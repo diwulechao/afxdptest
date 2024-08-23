@@ -47,6 +47,26 @@ TranslateRxToTx(
     }*/
 }
 
+static
+VOID
+PrintFrame(
+    _Inout_ UCHAR* Frame,
+    _In_ UINT32 Length
+)
+{
+    ethhdr* eth = (ETHERNET_HEADER*)Frame;
+    iphdr* iph = (iphdr*)(Frame + sizeof(*eth));
+    // udphdr* udph = (udphdr*)((unsigned char*)iph + (iph->ihl * 4));
+    
+    uint8_t octet1 = (iph->SourceAddress >> 24) & 0xFF;
+    uint8_t octet2 = (iph->SourceAddress >> 16) & 0xFF;
+    uint8_t octet3 = (iph->SourceAddress >> 8) & 0xFF;
+    uint8_t octet4 = iph->SourceAddress & 0xFF;
+
+    // Format the octets into the IPv4 address string
+    printf("%u.%u.%u.%u Protocol %u\n", octet4, octet3, octet2, octet1, iph->protocol);
+}
+
 unsigned char packet[] = { 0x00 ,0x00 ,0x5e ,0x00 ,0x01 ,0xd2 ,0x00 ,0x15 ,0x5d ,0x8c ,0x6b ,0x02 ,0x08 ,0x00 ,0x45 ,0x00
  ,0x00 ,0x64 ,0x60 ,0x37 ,0x00 ,0x00 ,0x80 ,0x11 ,0x07 ,0x62 ,0x0a ,0x82 ,0x43 ,0x0c ,0x28 ,0x42
  ,0x5d ,0x20 ,0xe4 ,0x9d ,0x00 ,0x35 ,0x00 ,0x50 ,0x4c ,0xac ,0xc4 ,0xd6 ,0x01 ,0x20 ,0x00 ,0x01
@@ -84,6 +104,10 @@ main(
 
     memset(&Rule, 0, sizeof(Rule));
     IfIndex = 10;
+
+    if (argc >= 2) {
+        IfIndex = atoi(argv[1]);
+    }
 
     //
     // Retrieve the XDP API dispatch table.
@@ -196,7 +220,7 @@ main(
     //
 
     Rule.Match = XDP_MATCH_UDP_DST;
-    Rule.Pattern.Port = htons(58525);
+    Rule.Pattern.Port = htons(53);
     Rule.Action = XDP_PROGRAM_ACTION_REDIRECT;
     Rule.Redirect.TargetType = XDP_REDIRECT_TARGET_TYPE_XSK;
     Rule.Redirect.Target = Socket;
@@ -207,14 +231,19 @@ main(
         return EXIT_FAILURE;
     }
 
-    XskRingProducerReserve(&TxRing, 1, &RingIndex);
-    XSK_BUFFER_DESCRIPTOR* tx = (XSK_BUFFER_DESCRIPTOR*)XskRingGetElement(&TxRing, RingIndex);
-    memcpy(Frame, packet, sizeof(packet));
-    tx->Length = sizeof(packet);
-    XskRingProducerSubmit(&TxRing, 1);
+    XskRingProducerReserve(&RxFillRing, 1, &RingIndex);
+
+    //
+    // The value of each RX fill and TX completion ring element is an offset
+    // from the start of the UMEM to the start of the frame. Since this sample
+    // is using a single buffer, the offset is always zero.
+    //
+    *(UINT64*)XskRingGetElement(&RxFillRing, RingIndex) = 0;
+
+    XskRingProducerSubmit(&RxFillRing, 1);
 
     while (TRUE) {
-        /*
+
         if (XskRingConsumerReserve(&RxRing, 1, &RingIndex) == 1) {
             XSK_BUFFER_DESCRIPTOR* RxBuffer;
             XSK_BUFFER_DESCRIPTOR* TxBuffer;
@@ -230,23 +259,26 @@ main(
             // Reserve space in the TX ring. Since we're only using one frame in
             // this sample, space is guaranteed to be available.
             //
-            XskRingProducerReserve(&TxRing, 1, &RingIndex);
-            TxBuffer = (XSK_BUFFER_DESCRIPTOR*)XskRingGetElement(&TxRing, RingIndex);
+            XskRingProducerReserve(&RxFillRing, 1, &RingIndex);
+            TxBuffer = (XSK_BUFFER_DESCRIPTOR*)XskRingGetElement(&RxFillRing, RingIndex);
+
+            PrintFrame(
+                &Frame[RxBuffer->Address.BaseAddress + RxBuffer->Address.Offset],
+                RxBuffer->Length);
 
             //
             // Since the RX and TX buffer descriptor formats are identical,
             // simply copy the descriptor across rings.
             //
             *TxBuffer = *RxBuffer;
-            TxBuffer->Length = sizeof(packet);
-            memcpy(Frame, packet, sizeof(packet));
+
             //
             // Advance the consumer index of the RX ring and the producer index
             // of the TX ring, which allows XDP to write and read the descriptor
             // elements respectively.
             //
             XskRingConsumerRelease(&RxRing, 1);
-            XskRingProducerSubmit(&TxRing, 1);
+            XskRingProducerSubmit(&RxFillRing, 1);
 
             //
             // Notify XDP that a new element is available on the TX ring, since
@@ -258,8 +290,9 @@ main(
                 LOGERR("XskNotifySocket failed: %x", Result);
                 return EXIT_FAILURE;
             }
-        }*/
+        }
 
+        /*
         if (XskRingConsumerReserve(&TxCompRing, 1, &RingIndex) == 1) {
             UINT64* Tx;
             UINT64* Rx;
@@ -291,7 +324,7 @@ main(
             //
             XskRingConsumerRelease(&TxCompRing, 1);
             XskRingProducerSubmit(&TxRing, 1);
-        }
+        }*/
     }
 
     //
